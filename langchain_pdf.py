@@ -1,49 +1,97 @@
+import streamlit as st
+from PyPDF2 import PdfReader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 #import os
-#from dotenv import load_dotenv
-from langchain.document_loaders.csv_loader import CSVLoader
-from langchain.embeddings import HuggingFaceInstructEmbeddings #_community.
+from langchain.embeddings import HuggingFaceInstructEmbeddings
+#from langchain_google_genai import GoogleGenerativeAIEmbeddings
+import google.generativeai as genai
 from langchain.vectorstores import FAISS
+from langchain.llms import GooglePalm
+#from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain.chains.question_answering import load_qa_chain
 from langchain.prompts import PromptTemplate
-from  langchain.chains import RetrievalQA
+#from dotenv import load_dotenv
 
 #load_dotenv()
-
-from langchain.llms import GooglePalm
-#api_key='AIzaSyBJsNVLoUWq_svCzc_Ga4ylv3kzX96SNFA'
-
-llm= GooglePalm(google_api_key='AIzaSyBJsNVLoUWq_svCzc_Ga4ylv3kzX96SNFA', temperature=0.1)
+#os.getenv("GOOGLE_API_KEY")
+genai.configure(api_key='AIzaSyBJsNVLoUWq_svCzc_Ga4ylv3kzX96SNFA')
 
 
-instructor_embeddings = HuggingFaceInstructEmbeddings()
-vdb_file_path='faiss-index'
-def create_vector_db():
-    loader = CSVLoader(file_path='codebasics_faqs.csv', source_column='prompt')
-    data = loader.load()
-    vectordb= FAISS.from_documents(documents = data, embedding = instructor_embeddings)
-    vectordb.save_local(vdb_file_path)
+def get_pdf_text(pdf_docs):
+    text = ""
+    for pdf in pdf_docs:
+        pdf_reader = PdfReader(pdf)
+        for page in pdf_reader.pages:
+            text += page.extract_text()
+    return text
 
 
-def get_qa_chain():
-    vectordb = FAISS.load_local(vdb_file_path, instructor_embeddings)
+def get_text_chunks(text):
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    chunks = text_splitter.split_text(text)
+    return chunks
 
-    retriever = vectordb.as_retriever(score_threshold=0.7)
+
+def get_vector_store(text_chunks):
+    embeddings = HuggingFaceInstructEmbeddings()
+    vector_store = FAISS.from_texts(text_chunks, embedding=embeddings)
+    vector_store.save_local("faiss_index")
 
 
-    prompt_template = """Given the context and a question, generate an answer based on this context.
-        Try to provide as much text as possible from the 'response' section in the source document.
-        If the answer is not found in the context, kindly state 'i dONT Know'. Don't try to make up an answer
-        CONTEXT : {context}
-        QUESTION : {question}"""
-    PROMPT = PromptTemplate(template=prompt_template, input_variables=['context', 'question'])
+def get_conversational_chain():
+    prompt_template = """
+    Answer the question as detailed as possible from the provided context, make sure to provide all the details, if the answer is not in
+    provided context just say, "answer is not available in the context", don't provide the wrong answer\n\n
+    Context:\n {context}?\n
+    Question: \n{question}\n
 
-    chain = RetrievalQA.from_chain_type(llm=llm,
-                                        chain_type='stuff',  # mapreduce
-                                        retriever=retriever,
-                                        input_key='query',
-                                        return_source_documents=True,
-                                        chain_type_kwargs={'prompt': PROMPT})
+    Answer:
+    """
+
+    llm= GooglePalm(google_api_key=os.environ['GOOGLE_API_KEY'], temperature=0.3)
+
+    prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
+    chain = load_qa_chain(llm, chain_type="stuff", prompt=prompt)
 
     return chain
-if __name__=='__main__':
-    chain= get_qa_chain()
 
+
+def user_input(user_question):
+    embeddings = HuggingFaceInstructEmbeddings()
+
+    new_db = FAISS.load_local("faiss_index", embeddings)
+    docs = new_db.similarity_search(user_question)
+
+    chain = get_conversational_chain()
+
+    response = chain(
+        {"input_documents": docs, "question": user_question}
+        , return_only_outputs=True)
+
+    print(response)
+    st.write("Reply: ", response["output_text"])
+
+
+def main():
+    st.set_page_config("Chat PDF")
+    st.header("Chat with PDF using Google Palm💁")
+
+    user_question = st.text_input("Ask a Question from the PDF Files")
+
+    if user_question:
+        user_input(user_question)
+
+    with st.sidebar:
+        st.title("Menu:")
+        pdf_docs = st.file_uploader("Upload your PDF Files and Click on the Submit & Process Button",
+                                    accept_multiple_files=True)
+        if st.button("Submit & Process"):
+            with st.spinner("Processing..."):
+                raw_text = get_pdf_text(pdf_docs)
+                text_chunks = get_text_chunks(raw_text)
+                get_vector_store(text_chunks)
+                st.success("Done")
+
+
+if __name__ == "__main__":
+    main()
